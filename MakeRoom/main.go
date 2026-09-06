@@ -8,11 +8,14 @@ import (
 	"sync"
 )
 
+// Server はマッチング(部屋待機)用のTCP接続を管理する。
+// 対戦相手を待つ2人のクライアントを受け付け、揃ったら通知する役割を持つ。
 type Server struct {
 	mu      sync.Mutex
-	clients map[net.Conn]struct{}
+	clients map[net.Conn]struct{} // 現在部屋に入っているTCPコネクションの集合
 }
 
+// MatchReadyMessage は2人揃ったときに全クライアントへ送るJSONメッセージ。
 type MatchReadyMessage struct {
 	Type        string `json:"type"`
 	Connected   int    `json:"connected"`
@@ -25,6 +28,9 @@ func NewServer() *Server {
 	}
 }
 
+// addClient は新しく接続してきたクライアントを部屋に追加する。
+// 追加した結果ちょうど2人になった瞬間だけ match_ready を通知する
+// (すでに2人いる状態からの再入室などで重複通知しないようにするため)。
 func (s *Server) addClient(conn net.Conn) {
 	s.mu.Lock()
 	before := len(s.clients)
@@ -43,12 +49,15 @@ func (s *Server) addClient(conn net.Conn) {
 	}
 }
 
+// removeClient は切断されたクライアントを部屋から取り除く。
 func (s *Server) removeClient(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.clients, conn)
 	s.mu.Unlock()
 }
 
+// broadcastJSON は値をJSONにシリアライズし、末尾に改行を付けて
+// 現在部屋にいる全クライアントへ送信する。
 func (s *Server) broadcastJSON(v any) {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -58,6 +67,8 @@ func (s *Server) broadcastJSON(v any) {
 
 	payload = append(payload, '\n')
 
+	// ロックを取っている間に接続の一覧だけコピーし、
+	// 実際の書き込み(ネットワークI/O)はロックの外で行う。
 	s.mu.Lock()
 	conns := make([]net.Conn, 0, len(s.clients))
 	for conn := range s.clients {
@@ -72,6 +83,9 @@ func (s *Server) broadcastJSON(v any) {
 	}
 }
 
+// main はTCPサーバーを起動し、接続してきたクライアントを部屋に登録する。
+// マッチング自体は「TCP接続を受け入れる」だけで完了し、
+// 座標や攻撃などの実際の対戦通信はBattleサーバー(UDP)側が担当する。
 func main() {
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -90,11 +104,14 @@ func main() {
 			continue
 		}
 
+		// クライアントごとに専用goroutineを立て、接続が切れるまでブロックさせる。
 		go func(c net.Conn) {
 			log.Printf("client connected: %s", c.RemoteAddr().String())
 			server.addClient(c)
 
-			// Block until the client disconnects.
+			// クライアントからの受信データは使わないので読み捨てる。
+			// io.Copyがエラー(切断)を返すまでここでブロックし続けることで、
+			// 「接続が生きている間だけ部屋に居続ける」を表現している。
 			_, _ = io.Copy(io.Discard, c)
 
 			server.removeClient(c)

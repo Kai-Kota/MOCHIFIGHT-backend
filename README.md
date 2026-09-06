@@ -48,7 +48,6 @@ MakeRoom/main.go     TCPマッチングサーバー
 Battle/main.go       UDPバトルサーバー本体(座標中継・HP管理・タイムアウト監視)
 Battle/HPManager.go  HP更新/死亡/ウェルカムメッセージの型・定数定義
 Battle/collision.go  サーバー側当たり判定のスタブ(未実装)
-server/main.go       MakeRoom+Battleを1プロセスに統合した実験実装(現状未使用)
 ```
 
 ## 通信プロトコル仕様
@@ -82,5 +81,3 @@ server/main.go       MakeRoom+Battleを1プロセスに統合した実験実装(
 ## 既知の課題
 
 - **サーバー権威の当たり判定が未実装**: `hit_report`はクライアントの自己申告をそのまま信頼しており、サーバー側での座標検証(`Battle/collision.go`)は空のまま。チート対策の観点で改善余地あり。
-- **`server/main.go`が重複実装**: `MakeRoom`+`Battle`を1プロセスにまとめた版だが、現状のエントリーポイント(`start_servers.bat`)からは使われておらず、既に`G:`(掴み技)の中継処理が抜けるなど本体側とプロトコルが乖離し始めている。統合するか削除するかの整理が必要。
-- テストコードが未整備。
