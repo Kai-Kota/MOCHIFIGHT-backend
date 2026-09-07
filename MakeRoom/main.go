@@ -8,11 +8,14 @@ import (
 	"sync"
 )
 
+// マッチング用のTCPコネクションをまとめて管理する構造体
+// 今つながってるクライアントを覚えておくだけ
 type Server struct {
 	mu      sync.Mutex
-	clients map[net.Conn]struct{}
+	clients map[net.Conn]struct{} // 今つながってる人たちのコネクション一覧
 }
 
+// 2人揃ったときに送るマッチ成立のJSON
 type MatchReadyMessage struct {
 	Type        string `json:"type"`
 	Connected   int    `json:"connected"`
@@ -25,6 +28,8 @@ func NewServer() *Server {
 	}
 }
 
+// 新しく接続してきた人を部屋に追加する処理
+// ちょうど2人になった瞬間だけmatch_readyを送る
 func (s *Server) addClient(conn net.Conn) {
 	s.mu.Lock()
 	before := len(s.clients)
@@ -43,12 +48,14 @@ func (s *Server) addClient(conn net.Conn) {
 	}
 }
 
+// 切断された人を部屋から消す
 func (s *Server) removeClient(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.clients, conn)
 	s.mu.Unlock()
 }
 
+// JSONに変換して改行つけて、部屋にいる全員に送る
 func (s *Server) broadcastJSON(v any) {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -58,6 +65,8 @@ func (s *Server) broadcastJSON(v any) {
 
 	payload = append(payload, '\n')
 
+	// ロック中にコネクション一覧だけコピーしておいて
+	// 実際に送信する処理はロックの外で行う
 	s.mu.Lock()
 	conns := make([]net.Conn, 0, len(s.clients))
 	for conn := range s.clients {
@@ -72,6 +81,9 @@ func (s *Server) broadcastJSON(v any) {
 	}
 }
 
+// TCPサーバーを立てて、つながってきた人を部屋に入れる処理
+// マッチング側はここで完結してて、対戦中の座標とか攻撃のやりとりは
+// Battleサーバーで行う
 func main() {
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -90,11 +102,14 @@ func main() {
 			continue
 		}
 
+		// 1人ずつgoroutineを立てて、切断されるまでそのまま待たせておく
 		go func(c net.Conn) {
 			log.Printf("client connected: %s", c.RemoteAddr().String())
 			server.addClient(c)
 
-			// Block until the client disconnects.
+			// クライアントから何か送られてきても中身は使わないので捨てる
+			// io.Copyがエラー返す=切断された、ということなので
+			// それまでずっとここで止まってる
 			_, _ = io.Copy(io.Discard, c)
 
 			server.removeClient(c)
