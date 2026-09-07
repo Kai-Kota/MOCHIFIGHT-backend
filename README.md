@@ -1,6 +1,6 @@
-# MOCHIFIGHT Backend
+# MOCHIFIGHT-backend
 
-2Dアクション対戦ゲーム「MOCHIFIGHT」のバックエンドサーバー。Go言語(標準ライブラリのみ)で実装したリアルタイム対戦マッチング・バトルサーバーです。
+3Dアクション対戦ゲーム「MOCHIFIGHT」のバックエンドサーバー。Go言語(標準ライブラリのみ)で実装したリアルタイム対戦マッチング・バトルサーバーです。
 
 ## アーキテクチャ
 
@@ -41,13 +41,20 @@ Windowsでは両方をまとめて起動するバッチファイルも用意し�
 start_servers.bat
 ```
 
+## テストの実行方法
+
+```bash
+go test ./...
+```
+
 ## ディレクトリ構成
 
 ```
-MakeRoom/main.go     TCPマッチングサーバー
-Battle/main.go       UDPバトルサーバー本体(座標中継・HP管理・タイムアウト監視)
-Battle/HPManager.go  HP更新/死亡/ウェルカムメッセージの型・定数定義
-Battle/collision.go  サーバー側当たり判定のスタブ(未実装)
+MakeRoom/main.go       TCPマッチングサーバー
+MakeRoom/main_test.go  MakeRoomのユニットテスト
+Battle/main.go         UDPバトルサーバー本体(座標中継・HP管理・タイムアウト監視)
+Battle/HPManager.go    HP更新/死亡/ウェルカムメッセージの型・定数定義
+Battle/main_test.go    Battleのユニットテスト
 ```
 
 ## 通信プロトコル仕様
@@ -80,4 +87,4 @@ Battle/collision.go  サーバー側当たり判定のスタブ(未実装)
 
 ## 既知の課題
 
-- **サーバー権威の当たり判定が未実装**: `hit_report`はクライアントの自己申告をそのまま信頼しており、サーバー側での座標検証(`Battle/collision.go`)は空のまま。チート対策の観点で改善余地あり。
+- **サーバー権威の当たり判定が未実装**: `hit_report`はクライアントの自己申告をそのまま信頼しており、サーバー側で座標をもとにした検証は行っていない。チート対策の観点で改善余地あり。

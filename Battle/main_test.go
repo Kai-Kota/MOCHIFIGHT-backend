@@ -6,15 +6,15 @@ import (
 	"time"
 )
 
-// addr はテスト用にポート番号だけ変えたUDPアドレスを作るヘルパー。
-// registerClient等はアドレスの文字列表現をキーにするため、ポートを変えれば
-// 別クライアントとして扱われる。
+// addr はテスト用にポート番号だけ変えたUDPアドレスを作るための小道具
+// registerClientとかは文字列化したアドレスをキーにしてるので、
+// ポート変えるだけで別人として扱われるはず。
 func addr(port int) *net.UDPAddr {
 	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}
 }
 
-// 初回登録では known=false・accepted=true・becameFull=false となり、
-// HPが InitialHP で初期化されることを確認する。
+// 初めて登録したときにknown=false, accepted=true, becameFull=falseになって、
+// HPもInitialHPで初期化されるかを確認するテスト
 func TestRegisterClient_FirstTimeIsUnknownAndAccepted(t *testing.T) {
 	s := NewServer(nil)
 
@@ -34,8 +34,8 @@ func TestRegisterClient_FirstTimeIsUnknownAndAccepted(t *testing.T) {
 	}
 }
 
-// 2人目が登録されたタイミングで becameFull が true になり、
-// match_ready 通知を出すべきタイミングをサーバーが正しく検知できることを確認する。
+// 2人目が入ってきたタイミングでbecameFullがtrueになるか確認するテスト
+// ここがちゃんと動かないとmatch_readyが飛ばなくなる
 func TestRegisterClient_SecondClientFillsRoom(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -53,8 +53,8 @@ func TestRegisterClient_SecondClientFillsRoom(t *testing.T) {
 	}
 }
 
-// 既に2人が対戦中の部屋に3人目が来た場合、accepted=false で弾かれ、
-// 部屋の人数(=2)が変化しないことを確認する。
+// 2人埋まってるところに3人目が来たらちゃんと弾かれるか
+// 人数が2のまま変わらないことを確認するテスト
 func TestRegisterClient_ThirdClientIsRejected(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -76,8 +76,7 @@ func TestRegisterClient_ThirdClientIsRejected(t *testing.T) {
 	}
 }
 
-// 既に登録済みのアドレスから再度パケットが来た場合は known=true として扱われ、
-// (新規参加ではなく生存確認としての)再登録であることを確認する。
+// 一回登録した人からまたパケットが来たときはknown=trueになるか
 func TestRegisterClient_ExistingClientIsKnown(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -95,8 +94,8 @@ func TestRegisterClient_ExistingClientIsKnown(t *testing.T) {
 	}
 }
 
-// removeClient で退室させると、クライアント数とHP情報が両方消え、
-// 空いた枠に新しいクライアントが入れるようになることを確認する。
+// removeClientで退室させたら人数とHPの情報が消えて
+// 空いた枠にまた新しい人が入れるようになるかを確認するテスト
 func TestRemoveClient(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -110,15 +109,15 @@ func TestRemoveClient(t *testing.T) {
 	if _, ok := s.GetHP(addr(1).String()); ok {
 		t.Error("HP entry for removed client should be gone")
 	}
-	// 退室によって空いた枠が再利用できることを確認する。
+	// 枠が空いたので新しい人が入れるはず
 	_, accepted, _ := s.registerClient(addr(3))
 	if !accepted {
 		t.Error("expected slot to be reusable after removal")
 	}
 }
 
-// otherClient が「自分以外のもう一方のプレイヤー」を正しく返すことを確認する。
-// 対戦は常に2人なので、自分ではないアドレスを渡せば必ず相手が返るはず。
+// otherClientがもう一方のプレイヤーを返すか確認するテスト
+// 2人対戦なので、自分じゃないアドレスを渡せば絶対相手が返ってくるはず
 func TestOtherClient(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -134,7 +133,7 @@ func TestOtherClient(t *testing.T) {
 	}
 }
 
-// ApplyDamage が HitDamage 分だけ正しくHPを減算することを確認する。
+// ApplyDamageでHitDamage分HPが減るか確認するテスト
 func TestApplyDamage(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -146,7 +145,7 @@ func TestApplyDamage(t *testing.T) {
 	}
 }
 
-// 何度もダメージを与えてもHPが負の値にならず、0でクランプされることを確認する。
+// 何回もダメージ与え続けてもHPがマイナスにならず0で止まることを確認するテスト
 func TestApplyDamage_ClampsAtZero(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
@@ -160,8 +159,7 @@ func TestApplyDamage_ClampsAtZero(t *testing.T) {
 	}
 }
 
-// 登録されていない(存在しない)ターゲットにダメージを与えようとした場合、
-// -1 が返ってサーバー側で「対象なし」と判定できることを確認する。
+// いない人にダメージ与えようとしたら-1が返ってくることを確認するテスト
 func TestApplyDamage_UnknownTargetReturnsNegativeOne(t *testing.T) {
 	s := NewServer(nil)
 
@@ -170,14 +168,14 @@ func TestApplyDamage_UnknownTargetReturnsNegativeOne(t *testing.T) {
 	}
 }
 
-// evictStaleClients が clientTimeout を超えて音信不通のクライアントだけを
-// 退室させ、まだ生存している(lastSeenが新しい)クライアントには影響しないことを確認する。
+// evictStaleClientsがタイムアウトした人だけをちゃんと退室させて、
+// まだ生きてる人には影響しないことを確認するテスト
 func TestEvictStaleClients_RemovesOnlyExpiredEntries(t *testing.T) {
 	s := NewServer(nil)
 	s.registerClient(addr(1))
 	s.registerClient(addr(2))
 
-	// client 1 の最終受信時刻を強制的に過去にずらし、タイムアウト状態を再現する。
+	// client 1 のlastSeenを無理やり過去にずらしてタイムアウトを再現する
 	s.mu.Lock()
 	s.lastSeen[addr(1).String()] = time.Now().Add(-2 * clientTimeout)
 	s.mu.Unlock()

@@ -12,24 +12,22 @@ import (
 const (
 	listenAddr    = ":9052"
 	maxPlayers    = 2
-	clientTimeout = 5 * time.Second // この時間パケットが来なければ切断したとみなす
+	clientTimeout = 5 * time.Second // これだけパケットが来なかったら切断扱いにする
 )
 
-// Server は対戦中(バトル)のUDP通信状態を管理する。
-// 「誰が今この部屋にいるか」「各プレイヤーのHP」「最後にパケットを受け取った時刻」を保持し、
-// 座標や攻撃メッセージを2人のプレイヤー間で中継する。
+// Server は対戦中のUDPのやりとりをまとめて管理する構造体
+// 今部屋に誰がいるか、HPは何か、最後にいつパケット来たか、を全部ここで持ってる
+// 座標、攻撃のメッセージもここを経由して相手に転送される
 type Server struct {
 	mu       sync.Mutex
-	clients  map[string]*net.UDPAddr // key: UDPAddrの文字列表現(プレイヤーの識別子として使う)
-	order    []string                // 登録順(現状は表示・管理用で参照はしていない)
+	clients  map[string]*net.UDPAddr // UDPAddrを文字列にしたものをidとして使ってる
+	order    []string                // 登録した順番
 	conn     *net.UDPConn
 	hp       map[string]int
-	lastSeen map[string]time.Time // タイムアウト検知用の最終受信時刻
+	lastSeen map[string]time.Time // 最後にパケット来た時刻、タイムアウト判定用
 }
 
-// MatchReadyMessage は2人揃ったときに全クライアントへ送るJSONメッセージ。
-// MakeRoom側の同名メッセージと役割は同じだが、こちらはUDP到達後(=実際に対戦サーバーに
-// 接続できた後)に送られる、対戦サーバー側からの「準備完了」通知。
+// MatchReadyMessage は2人揃ったときに送るマッチ成立した確認のJSON
 type MatchReadyMessage struct {
 	Type        string `json:"type"`
 	Connected   int    `json:"connected"`
@@ -46,28 +44,24 @@ func NewServer(conn *net.UDPConn) *Server {
 	}
 }
 
-// registerClient はUDPパケットの送信元アドレスを部屋に登録する。
-// UDPにはTCPのような明示的な「接続」がないため、パケットを受け取るたびに
-// このメソッドを呼んで「今このアドレスは生きている」ことを記録する。
-//
-// 戻り値:
-//
-//	known      : 以前から登録済みのアドレスだったか
-//	accepted   : 今回のパケットを処理してよいか(満室なら false)
-//	becameFull : このパケットの処理によって、たった今2人揃ったか
+// パケット送ってきたアドレスを部屋に登録する処理
+
+//	known      : 前から知ってるアドレスかどうか
+//	accepted   : 今回の分を処理していいか
+//	becameFull : このタイミングでちょうど2人揃ったかどうか
 func (s *Server) registerClient(addr *net.UDPAddr) (known bool, accepted bool, becameFull bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	key := addr.String()
 	if _, exists := s.clients[key]; exists {
-		// 既知のクライアント: 生存確認(lastSeen)だけ更新して返す。
+		// 前から知ってる人だったらlastSeenだけ更新して終わり
 		s.lastSeen[key] = time.Now()
 		return true, true, false
 	}
 
 	if len(s.clients) >= maxPlayers {
-		// 3人目以降は対戦に参加できないので無視する。
+		// もう2人埋まってたら3人目以降は入れない
 		return false, false, false
 	}
 
@@ -75,14 +69,13 @@ func (s *Server) registerClient(addr *net.UDPAddr) (known bool, accepted bool, b
 	s.order = append(s.order, key)
 	s.lastSeen[key] = time.Now()
 	if _, ok := s.hp[key]; !ok {
-		// 初回登録時のみHPを満タンで初期化する
-		// (evictStaleClientsで一時的に消えて復帰した場合の再初期化は起きない設計)。
+		// 初めて来た人だけHPを満タンにする
 		s.hp[key] = 100
 	}
 	return false, true, len(s.clients) == maxPlayers
 }
 
-// removeClient は指定アドレスのプレイヤーを部屋・HP・生存時刻の管理対象から除外する。
+// removeClient は指定した人を部屋・HP・生存時刻の管理から全部消す
 func (s *Server) removeClient(addr *net.UDPAddr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -100,10 +93,8 @@ func (s *Server) removeClient(addr *net.UDPAddr) {
 	}
 }
 
-// evictStaleClients は lastSeen が clientTimeout を超えたクライアントを削除する。
-// UDPは切断イベントが飛んでこないため、一定時間パケットが来なくなったクライアントを
-// 定期的に(呼び出し元のticker経由で)強制的に部屋から退出させることで、
-// 通信が途切れたプレイヤーが部屋に居座り続けるのを防いでいる。
+// 一定時間(clientTimeout)パケットが来てない人を強制退室させる
+// 定期的にチェックしてフリーズしたプレイヤーがずっと部屋に居座るのを防ぐ処理
 func (s *Server) evictStaleClients() {
 	s.mu.Lock()
 	var stale []string
@@ -130,12 +121,8 @@ func (s *Server) evictStaleClients() {
 	}
 }
 
-// ApplyDamage は target のHPを dmg 分だけ減らし、減算後のHPを返す。
-// HPは0未満にならないようクランプする。target が未登録の場合は -1 を返す。
-//
-// 注意: ダメージ量やヒットの有無はクライアントからの自己申告(hit_report)を
-// そのまま信用しており、サーバー側で座標をもとにした当たり判定は行っていない
-// (README「既知の課題」参照)。
+// target のHPを dmg だけ減らして、減った後のHPを返す関数
+// マイナスにはならないように0で止める、targetが見つからなかったら-1を返す
 func (s *Server) ApplyDamage(target string, dmg int) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,7 +136,7 @@ func (s *Server) ApplyDamage(target string, dmg int) int {
 	return s.hp[target]
 }
 
-// GetHP は target の現在HPを返す。存在しない場合は ok が false になる。
+// 今のHPを返す、登録されてなかったらokがfalseになる
 func (s *Server) GetHP(target string) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,15 +144,15 @@ func (s *Server) GetHP(target string) (int, bool) {
 	return v, ok
 }
 
-// clientCount は現在部屋にいるクライアント数を返す。
+// 今部屋にいる人数を返す
 func (s *Server) clientCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.clients)
 }
 
-// otherClient は sender 以外に登録されているクライアントのアドレスを返す
-// (最大2人対戦なので「もう一方のプレイヤー」を意味する)。いなければ nil。
+// 自分(sender)以外の登録済みアドレスを返す関数。
+// 2人対戦しかないので、相手プレイヤーを探してる、いなければnil
 func (s *Server) otherClient(sender *net.UDPAddr) *net.UDPAddr {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,7 +165,7 @@ func (s *Server) otherClient(sender *net.UDPAddr) *net.UDPAddr {
 	return nil
 }
 
-// broadcastJSON は値をJSONにシリアライズし、部屋にいる全クライアントへUDPで送信する。
+// JSONにして部屋にいる全員にUDPで送る
 func (s *Server) broadcastJSON(v any) {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -200,15 +187,9 @@ func (s *Server) broadcastJSON(v any) {
 	}
 }
 
-// sendText は生文字列のメッセージを指定アドレスへ送信する(現状未使用のヘルパー)。
-func (s *Server) sendText(addr *net.UDPAddr, message string) {
-	if _, err := s.conn.WriteToUDP([]byte(message), addr); err != nil {
-		log.Printf("failed to send to %s: %v", addr.String(), err)
-	}
-}
-
-// main はUDPサーバーを起動し、受信したパケットの種類に応じて
-// 「登録」「マッチ成立通知」「ヒット判定」「座標/攻撃の中継」「退室」を処理する。
+// main関数
+// UDPサーバー立ち上げて、パケットが来たら中身によって
+// 登録・マッチ成立通知・ヒット判定・座標や攻撃の中継・退室のように振り分けてる
 func main() {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 9052})
 	if err != nil {
@@ -220,7 +201,7 @@ func main() {
 
 	server := NewServer(conn)
 
-	// タイムアウトチェックを定期実行
+	// 2秒おきにタイムアウトチェックを回しておく
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -239,17 +220,16 @@ func main() {
 		}
 
 		message := strings.TrimSpace(string(buffer[:n]))
-		// パケットを受け取るたびに送信元を登録/生存確認する。
+		// パケット来るたびに毎回登録/生存確認をする
 		known, accepted, becameFull := server.registerClient(remoteAddr)
 		if !accepted {
-			// 部屋が満員で受け入れられなかった(=対戦に無関係な3人目以降)ので、
-			// このパケットは中継等の処理をせずに読み捨てる。
+			// 部屋が満員で入れなかったので、このパケットは何もせず捨てる
 			log.Printf("ignored packet from unregistered client %s because the room is full", remoteAddr.String())
 			continue
 		}
 
 		if !known {
-			// 初回登録: 現在のHPを全員に共有し、本人には自分のIDを教える(welcome)。
+			// 初めて来た人には、今のHPをみんなに共有しつつ、本人には自分のID(welcome)を教える
 			if hp, ok := server.GetHP(remoteAddr.String()); ok {
 				server.broadcastJSON(HPUpdate{Type: "hp_update", Target: remoteAddr.String(), HP: hp})
 			}
@@ -265,7 +245,7 @@ func main() {
 		}
 
 		if becameFull {
-			// このパケットの登録処理でちょうど2人揃った瞬間に一度だけ通知する。
+			// ちょうど2人揃った瞬間だけ通知が飛ぶ
 			server.broadcastJSON(MatchReadyMessage{
 				Type:        "match_ready",
 				Connected:   server.clientCount(),
@@ -273,14 +253,14 @@ func main() {
 			})
 		}
 
-		// メッセージ種別を判定するため、まず "type" フィールドだけ取り出す。
+		// とりあえず"type"だけ取り出してどんなメッセージか判定する
 		var base struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(buffer[:n], &base); err == nil {
 			if base.Type == "hit_report" {
-				// クライアントから「自分の攻撃が相手に当たった」という自己申告を受け取り、
-				// 対象(target)のHPを減らして全員に結果を通知する。
+				// 攻撃の当たった報告がクライアントから来たら、
+				// 対象のHPを減らしてみんなに結果を知らせる
 				var hr struct {
 					Type    string `json:"type"`
 					Target  string `json:"target"`
@@ -292,7 +272,7 @@ func main() {
 				} else {
 					target := hr.Target
 					if target == "" {
-						// target未指定の場合は「もう一方のプレイヤー」を対象とみなす。
+						// targetが空だったらとりあえず相手を対象にしとく
 						other := server.otherClient(remoteAddr)
 						if other != nil {
 							target = other.String()
@@ -315,12 +295,8 @@ func main() {
 			}
 		}
 
-		// 以下は高頻度に送られる軽量メッセージ(生文字列プレフィックス形式)の中継処理。
-		// JSONではなくプレフィックス文字列にしているのは、毎フレーム送信される
-		// 座標・弾・掴み技のデータ量とパース負荷を抑えるため。
-
 		if strings.HasPrefix(message, "P:") {
-			// プレイヤー座標をそのまま相手に転送する。
+			// プレイヤーの座標をそのまま相手に投げる
 			other := server.otherClient(remoteAddr)
 			if other != nil {
 				if _, err := conn.WriteToUDP([]byte(message), other); err != nil {
@@ -330,7 +306,7 @@ func main() {
 		}
 
 		if strings.HasPrefix(message, "S:") {
-			// 弾(Shot)の座標・向きを相手に転送する。
+			// 弾の座標をそのまま相手に投げる
 			other := server.otherClient(remoteAddr)
 			if other != nil {
 				if _, err := conn.WriteToUDP([]byte(message), other); err != nil {
@@ -340,7 +316,7 @@ func main() {
 		}
 
 		if strings.HasPrefix(message, "G:") {
-			// 掴み技(Grapple)の情報を相手に転送する。
+			// グラップルの座標をそのまま相手に投げる
 			other := server.otherClient(remoteAddr)
 			if other != nil {
 				if _, err := conn.WriteToUDP([]byte(message), other); err != nil {
@@ -350,7 +326,7 @@ func main() {
 		}
 
 		if message == "disconnect" {
-			// クライアントからの明示的な退室通知。
+			// 自分から退室する場合
 			server.removeClient(remoteAddr)
 		}
 	}

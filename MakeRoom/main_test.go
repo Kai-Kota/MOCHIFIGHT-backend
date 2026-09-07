@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// fakeConn は実際のソケットを使わずにテストするための net.Conn の簡易スタブ。
-// nilのnet.Connを埋め込んでいるので、addClient/broadcastJSONが実際に呼び出す
-// Writeメソッドだけを上書きし、それ以外のメソッドは呼ばれない前提にしている
-// (呼ばれるとnil埋め込みによりpanicする)。
+// fakeConn は本物のソケットを使わずにテストするための偽物
+// nilのnet.Connを埋め込んでるだけなので、addClient/broadcastJSONが呼ぶ
+// Writeだけ自前で用意して、それ以外は呼ばれない前提でいる
 type fakeConn struct {
 	net.Conn
 	id string
@@ -18,9 +17,9 @@ func (f *fakeConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// 2人目が入室したタイミングでちょうど部屋が満員(2人)になることを確認する。
-// (match_ready の実際の送信内容自体はbroadcastJSON経由でfakeConn.Writeに渡るだけで
-// 検証していないが、Writeでpanicしないこと自体が「通知処理が正しく1回だけ走る」ことの確認になる)
+// 2人目が入ったタイミングでちゃんと満員になるか確認するテスト
+// match_readyの中身自体はチェックしてないけど、Writeでpanicしなければ
+// 通知処理がおかしなことになってないという確認になる
 func TestAddClient_NotifiesOnlyWhenRoomFills(t *testing.T) {
 	s := NewServer()
 	a := &fakeConn{id: "a"}
@@ -37,7 +36,7 @@ func TestAddClient_NotifiesOnlyWhenRoomFills(t *testing.T) {
 	}
 }
 
-// removeClient で退室させたconnが部屋の管理対象から消えることを確認する。
+// removeClientしたら部屋の管理から消えるか確認するテスト
 func TestRemoveClient(t *testing.T) {
 	s := NewServer()
 	a := &fakeConn{id: "a"}
@@ -50,8 +49,7 @@ func TestRemoveClient(t *testing.T) {
 	}
 }
 
-// 登録されていないconnをremoveClientに渡しても、既存クライアントに影響しない
-// (delete on missing map key is a no-op)ことを確認する。
+// 登録してないconnをremoveClientに渡しても、既存の人には影響しないことの確認
 func TestRemoveClient_UnknownConnIsNoOp(t *testing.T) {
 	s := NewServer()
 	a := &fakeConn{id: "a"}
